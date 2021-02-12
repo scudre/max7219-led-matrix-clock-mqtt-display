@@ -8,7 +8,7 @@ import ttldict
 class MessageProvider:
     
     def __init__(self, mqtt_config):
-        self.ttl_cache = ttldict.TTLOrderedDict(60 * 3)
+        self.ttl_cache = ttldict.TTLOrderedDict(60 * 5)
         self.config = mqtt_config
         self.client = None
     
@@ -18,7 +18,10 @@ class MessageProvider:
         
         def mqtt_on_message(cl, userdata, msg):
             raw = msg.payload.decode("utf-8", "ignore")
-            self.ttl_cache[msg.topic] = json.loads(raw)
+            json_obj = json.loads(raw)
+            self.ttl_cache[msg.topic] = json_obj
+            if 'ttl' in json_obj:
+                self.ttl_cache.set_ttl(msg.topic, json_obj["ttl"])
         
         self.client = mqtt.Client()
         self.client.on_connect = mqtt_on_connect
