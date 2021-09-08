@@ -1,0 +1,6 @@
+mqtt_server = {
+    'username': 'scud',
+    'password': 'medo12',
+    'ip_address': 'ubuntu-hassio',
+    'port': 1883,
+}
