@@ -1,10 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-
-# XXXXX
-# https://community.home-assistant.io/t/howto-use-temperature-from-weather-home-as-trigger/200260
-
 import signal
 import time
 from datetime import date
@@ -21,9 +17,7 @@ from luma.led_matrix.device import max7219
 import config
 from messageprovider import MessageProvider
 
-CLOCK_ENABLED = False
-CLOCK_FONT = proportional(TINY_FONT)
-MSG_FONT = proportional(TINY_FONT)
+
 
 # Replace with nice state class?
 VALID_DISPLAY_VALUES = [
@@ -120,12 +114,8 @@ def vertical_scroll(device, words=["foo", "bar", "bat", "bang"]):
     
     with canvas(virtual) as draw:
         for i, word in enumerate(messages):
-            text(draw, (0, i * 12), word, fill="white", font=MSG_FONT)
-        
-        if CLOCK_ENABLED:
-            draw_clock_2(draw, ts, y_val=first_y_index)
-            draw_clock_2(draw, ts, y_val=last_y_index)
-    
+            text(draw, (0, i * 12), word, fill="white", font=proportional(TINY_FONT))
+            
     for i in range(virtual.height - 12):
         virtual.set_position((0, i))
         if i > 0 and i % 12 == 0:
@@ -165,7 +155,7 @@ def show_aqi(device, weather, y_val=0):
 def show_notifications(device, msg_provider):
     #animation(device, 1, 8)
     for msg in msg_provider.messages(filter_topics=['weather']):
-        show_message(device, cp437_encode(full_msg), fill="white", font=proportional(CLOCK_FONT), scroll_delay=0.022)
+        show_message(device, cp437_encode(full_msg), fill="white", font=proportional(TINY_FONT), scroll_delay=0.022)
     #animation(device, 8, 1)
     time.sleep(1)
 
@@ -184,7 +174,6 @@ def main():
     signal.signal(signal.SIGTERM, exit_gracefully)
     
     print('okay lets go')
-    show = False
     while True:
         curr_time = datetime.now()
         weather = msg_provider.message('weather')
@@ -193,13 +182,11 @@ def main():
             show_aqi(display.device, weather)
             n_show_forecast(display.device, weather)
             transition(display.device, weather, 8, -1, show_curr_weather)  
-            show = False
         else:
             show_curr_aqi(display.device, weather)
             time.sleep(5)
             show_curr_weather(display.device, weather)
             display.current = True
-            show = True
         time.sleep(10)
 
 
