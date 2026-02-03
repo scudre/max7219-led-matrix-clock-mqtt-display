@@ -17,6 +17,7 @@ from luma.core.legacy.font import proportional, CP437_FONT, TINY_FONT, LCD_FONT
 from luma.core.render import canvas
 from luma.core.virtual import viewport
 from luma.led_matrix.device import max7219
+from luma.core.sprite_system import framerate_regulator
 
 import config
 from messageprovider import MessageProvider
@@ -24,16 +25,16 @@ from messageprovider import MessageProvider
 CLOCK_ENABLED = False
 CLOCK_FONT = proportional(TINY_FONT)
 MSG_FONT = proportional(TINY_FONT)
+DISPLAY_TIME = 8
+HOUSE_ICON = 0x00007c5444281000
+HUMID_ICONS = [
+    (70, 0x001c3e3e3e3e1c08),
+    (40, 0x001c3e3e22361c08),
+    (30, 0x001c3e2222361c08),
+    (-1, 0x001c362222361c08),
+]
 
-# Replace with nice state class?
-VALID_DISPLAY_VALUES = [
-    'blank'
-    'forecast',
-    'current',
-    'notifications'
-    ]
-
-weather = {
+WEATHER_ICONS = {
 'sunny'     : 0x9142183dbc184289,
 'foggy'     : 0x55aa55aa55aa55aa,
 'cloudy'    : 0x00007c8282621c00,
@@ -41,7 +42,7 @@ weather = {
 'snowy'     : 0xa542a51818a542a5,
 'tstorm'    : 0x0a04087e8191710e,
 'windy'     : 0x005f807f001f2010,
-'clear'     : 0x000c26034313460c,
+'clear'     : 0x00184c0686268c18,
 }
 
 ha_weather_map = {
@@ -60,36 +61,101 @@ ha_weather_map = {
     'windy'           : 'windy',
     'windy-variant'   : 'windy',
     'exceptional'     : 'sunny',
-}    
+}
+
+def show_message_icons(device, msg, y_offset=0, fill=None, font=None,
+                 scroll_delay=0.03):
+    """
+    Scrolls a message right-to-left across the devices display.
+
+    :param device: The device to scroll across.
+    :param msg: The text message to display (must be ASCII only).
+    :type msg: str
+    :param y_offset: The row to use to display the text.
+    :type y_offset: int
+    :param fill: The fill color to use (standard Pillow color name or RGB
+        tuple).
+    :param font: The font (from :py:mod:`luma.core.legacy.font`) to use.
+    :param scroll_delay: The number of seconds to delay between scrolling.
+    :type scroll_delay: float
+    """
+    fps = 0 if scroll_delay == 0 else 1.0 / scroll_delay
+    regulator = framerate_regulator(fps)
+    font = font
+    with canvas(device) as draw:
+        w, h = textsize(msg, font)
+
+    x = device.width
+    virtual = viewport(device, width=w + x + x, height=device.height)
+
+    with canvas(virtual) as draw:
+        text(draw, (x, y_offset), msg, font=font, fill=fill)
+
+    i = 0
+    while i <= w + x:
+        with regulator:
+            virtual.set_position((i, 0))
+            i += 1
+
+
+def vertical_scroll(device, words=["foo", "bar", "bat", "bang"]):
+    messages = [" "] + words + [" "]
+    virtual = viewport(device, width=device.width, height=len(messages) * 12)
+    
+    first_y_index = 0
+    last_y_index = (len(messages) - 1) * 12
+    
+    with canvas(virtual) as draw:
+        for i, word in enumerate(messages):
+            text(draw, (0, i * 12), word, fill="white", font=MSG_FONT)
+        
+        if CLOCK_ENABLED:
+            draw_clock_2(draw, ts, y_val=first_y_index)
+            draw_clock_2(draw, ts, y_val=last_y_index)
+    
+    for i in range(virtual.height - 12):
+        virtual.set_position((0, i))
+        if i > 0 and i % 12 == 0:
+            time.sleep(10)
+        time.sleep(0.044)
+
+#==============================================================================================================#
 
 class Display(object):
-    def __init__(self, serial):
+    def __init__(self):
+        serial = spi(port=0, device=0, gpio=noop())
         self.device = max7219(serial, cascaded=4, block_orientation=-90, blocks_arranged_in_reverse_order=False)
         self.device.contrast(0)
-        self._state = 'blank'
-        #signal.signal(signal.SIGINT, self.exit_gracefully)
-        #signal.signal(signal.SIGTERM, self.exit_gracefully)
         
-    def state(self):
-        return self._state
-        
-    def blank(self):
-        return self._state == 'blank'
-        
-    def forecast(self):
-        return self._state == 'forecast'
-        
-    def current(self):
-        return self._state == 'current'
-    
-    def notifications(self):
-        return self._state == 'notifications'
 
+def humid_icon(humidity_str):
+    humidity = int(humidity_str) if humidity_str.isdigit() else 0
+    return next(icon for limit, icon in HUMID_ICONS if humidity > limit)
+
+def aqi_to_text(aqi):
+    """
+    Converts an AQI value to its human-readable category using a tuple-based approach.
+    Iterates from highest to lowest threshold and uses -1 for the lowest bound.
     
+    Parameters:
+        aqi (int): The Air Quality Index value.
+        
+    Returns:
+        str: The human-readable name of the AQI category.
+    """
+    categories = [
+        (300, 'Hazardous'),
+        (200, 'Very Unhealthy'),
+        (150, 'Unhealthy'),
+        (100, 'Unhealthy for Sensitive Groups'),
+        (50, 'Moderate'),
+        (-1, 'Good'),  # Use -1 to cover all AQI starting at 0
+    ]
+    
+    return next(name for limit, name in categories if aqi > limit)
 
 def weather_icon(name):
-    mapping = ha_weather_map.get(name, 'sunny')
-    return weather.get(mapping)
+    return WEATHER_ICONS.get(ha_weather_map.get(name, 'sunny'))
 
 def icon(draw, origin, icon_hex):
     points = []
@@ -110,56 +176,29 @@ def transition(device, weather, from_y, to_y, display_func):
         time.sleep(0.065)
         current_y += 1 if to_y > from_y else -1
 
-def vertical_scroll(device, words=["foo", "bar", "bat", "bang"]):
-    messages = [" "] + words + [" "]
-    virtual = viewport(device, width=device.width, height=len(messages) * 12)
-    import pdb; pdb.set_trace()
-    
-    first_y_index = 0
-    last_y_index = (len(messages) - 1) * 12
-    
-    with canvas(virtual) as draw:
-        for i, word in enumerate(messages):
-            text(draw, (0, i * 12), word, fill="white", font=MSG_FONT)
-        
-        if CLOCK_ENABLED:
-            draw_clock_2(draw, ts, y_val=first_y_index)
-            draw_clock_2(draw, ts, y_val=last_y_index)
-    
-    for i in range(virtual.height - 12):
-        virtual.set_position((0, i))
-        if i > 0 and i % 12 == 0:
-            time.sleep(10)
-        time.sleep(0.044)
-
-
-def show_curr_weather(device, weather, y_val=0):
+def display_message(device, first_icon, first_text, second_icon=None, second_text=None, first_offset=(0,0), second_offset=(0,0), y_val=0):
     with canvas(device) as draw:
-        house = 0x00003e2a22140800
-        icon(draw, (-1, y_val), house)
-        text(draw, (6, y_val), weather.get('in_temp', '?'), fill="white", font=proportional(TINY_FONT))
-        icon(draw, (15, y_val), weather_icon(weather.get('cond')))
-        text(draw, (24, y_val), weather.get('out_temp', '?'), fill="white", font=proportional(TINY_FONT))
-
-def draw_forecast(device, weather, y_val=0):
-    with canvas(device) as draw:
-        icon(draw, (0, y_val), weather_icon(weather.get('for_cond')))
-        text(draw, (11, y_val), weather.get('for_temp', '?'), fill="white", font=proportional(TINY_FONT))
-
-def n_show_forecast(device, weather, y_val=0):    
-    transition(device, weather, -8, 1, draw_forecast)
-    time.sleep(30)
-    transition(device, weather, 0, -8, draw_forecast)
+        icon(draw, (0 + first_offset[0], y_val), first_icon)
+        text(draw, (9 + first_offset[1], y_val), first_text, fill="white", font=MSG_FONT)
+        if second_icon and second_text:
+            icon(draw, (17 + second_offset[0], y_val), second_icon)
+            text(draw, (24 + second_offset[1], y_val), second_text, fill="white", font=MSG_FONT)
+    time.sleep(DISPLAY_TIME)
 
 
-def show_curr_aqi(device, weather, y_val=0):
-    with canvas(device) as draw:
-        text(draw, (0, y_val), "AQI: " + weather.get('curr_aqi', '?'), fill="white", font=proportional(TINY_FONT))
 
-    
 def show_aqi(device, weather, y_val=0):
-    show_message(device, "Tmrrw AQI: " + weather.get('for_aqi', '?'), fill="white", font=proportional(TINY_FONT), scroll_delay=0.05)
-    show_message(device, "Tmrrw AQI: " + weather.get('for_aqi', '?'), fill="white", font=proportional(TINY_FONT), scroll_delay=0.05)
+    curr_aqi = int(weather['curr_aqi']) if weather['curr_aqi'].isdigit() else 0
+    for_aqi = int(weather['for_aqi']) if weather['for_aqi'].isdigit() else 0
+    msg = ''
+    if curr_aqi > 60:
+        msg += "AQI: {0} {1}   ".format(aqi_to_text(curr_aqi), curr_aqi)
+    if for_aqi > 60:
+        msg += "Tmrrw AQI: {0} {1}".format(aqi_to_text(for_aqi), for_aqi)
+        
+    if msg:
+        show_message(device, msg, fill="white", font=MSG_FONT, scroll_delay=0.05)
+        time.sleep(0)
 
 
 def show_notifications(device, msg_provider):
@@ -169,10 +208,19 @@ def show_notifications(device, msg_provider):
     #animation(device, 8, 1)
     time.sleep(1)
 
+
+def show_house_cond(device, weather, y_val=0):
+    humidity = weather['in_humid']
+    display_message(device, HOUSE_ICON, weather['in_temp'], humid_icon(humidity), humidity)
+
+def show_curr_weather(device, weather, y_val=0):
+    humidity = weather['out_humid']
+    display_message(device, weather_icon(weather['cond']), weather['out_temp'], humid_icon(humidity), humidity)
+
+def show_forecast(device, weather, y_val=0):
+    display_message(device, weather_icon(weather['for_cond']), weather['for_temp'], first_offset=(0,2))
+
 def main():
-    serial = spi(port=0, device=0, gpio=noop())
-    display = Display(serial)
-    
     # Start mqtt message subscription
     msg_provider = MessageProvider(config)
     msg_provider.loop_start()
@@ -183,24 +231,25 @@ def main():
     signal.signal(signal.SIGINT, exit_gracefully)
     signal.signal(signal.SIGTERM, exit_gracefully)
     
+    display = Display()
+    time.sleep(0.5)
     print('okay lets go')
-    show = False
     while True:
-        curr_time = datetime.now()
         weather = msg_provider.message('weather')
-        if curr_time.minute % 4 == 0:
-            transition(display.device, weather, 0, 8, show_curr_weather)
-            show_aqi(display.device, weather)
-            n_show_forecast(display.device, weather)
-            transition(display.device, weather, 8, -1, show_curr_weather)  
-            show = False
-        else:
-            show_curr_aqi(display.device, weather)
-            time.sleep(5)
-            show_curr_weather(display.device, weather)
-            display.current = True
-            show = True
-        time.sleep(10)
+        if not weather:
+            show_message(display.device, "WAITING FOR DATA...", fill="white", font=MSG_FONT, scroll_delay=0.022)
+            continue
+            
+        display_funcs = [
+            show_house_cond,
+            show_curr_weather,
+            show_forecast,
+            show_aqi,
+            ]
+        
+        for item in display_funcs: item(display.device, weather)
+        
+        
 
 
 

@@ -2,7 +2,6 @@ import json
 import paho.mqtt.client as mqtt
 import ttldict
 import signal
-from collections import defaultdict
 
 class MessageProvider:
     
@@ -19,15 +18,16 @@ class MessageProvider:
         
         def mqtt_on_message(cl, userdata, msg):
             print('{} -> {}'.format(msg.topic, msg.payload))
-            try:
-                raw = msg.payload.decode("utf-8", "ignore")
-                json_obj = defaultdict(lambda: "?", json.loads(raw))
-                self.ttl_cache[msg.topic.split('/')[1]] = json_obj
-                if 'ttl' in json_obj:
-                    self.ttl_cache.set_ttl(msg.topic, json_obj["ttl"])
-            except:
-                print('Exception for this message: {} -> {}'.format(msg.topic, msg.payload))
-                return
+            #try:
+            
+            raw = msg.payload.decode("utf-8", "ignore")
+            json_obj = json.loads(raw)
+            self.ttl_cache[msg.topic.split('/')[1]] = json_obj
+            if 'ttl' in json_obj:
+                self.ttl_cache.set_ttl(msg.topic, json_obj["ttl"])
+            #except:
+            #    print('Exception for this message: {} -> {}'.format(msg.topic, msg.payload))
+            #    return
 
                         
         self.client = mqtt.Client()
