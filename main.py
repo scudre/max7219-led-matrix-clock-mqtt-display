@@ -1,31 +1,31 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-
-# XXXXX
 # https://community.home-assistant.io/t/howto-use-temperature-from-weather-home-as-trigger/200260
 
 import logging
+import os
 import signal
 import time
 
-from luma.core.interface.serial import spi, noop
-from luma.core.legacy import text, show_message
-from luma.core.legacy.font import proportional, TINY_FONT
-from luma.core.render import canvas
-from luma.core.virtual import viewport
-from luma.led_matrix.device import max7219
-from luma.core.sprite_system import framerate_regulator
+from PIL import ImageFont
+from dotenv import load_dotenv
 
-import config
+from display import Display
 from messageprovider import MessageProvider
 
 log = logging.getLogger(__name__)
 
-CLOCK_FONT = proportional(TINY_FONT)
-MSG_FONT = proportional(TINY_FONT)
-DISPLAY_TIME = 8
-HOUSE_ICON = 0x00007c5444281000
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+HOUSE_ICON = [0x00007c5444281000]
+AQI_DISPLAY_THRESHOLD = 60
+
+FONTS_DIR = os.path.join(os.path.dirname(__file__), 'fonts')
+STATUS_FONT = ImageFont.truetype(os.path.join(FONTS_DIR, 'MatrixLight6X.ttf'), 6)
+
 HUMID_ICONS = [
     (70, 0x001c3e3e3e3e1c08),
     (40, 0x001c3e3e22361c08),
@@ -34,18 +34,50 @@ HUMID_ICONS = [
 ]
 
 WEATHER_ICONS = {
-'sunny'     : 0x9142183dbc184289,
-'foggy'     : 0x55aa55aa55aa55aa,
-'cloudy'    : 0x00007c8282621c00,
-'rainy'     : 0x152a7e818191710e,
-'snowy'     : 0xa542a51818a542a5,
-'tstorm'    : 0x0a04087e8191710e,
-'windy'     : 0x005f807f001f2010,
-'clear'     : 0x00184c0686268c18,
+    'sunny'     : 0x9142183dbc184289,
+    'foggy'     : 0x55aa55aa55aa55aa,
+    'cloudy'    : 0x00007c8282621c00,
+    'rainy'     : 0x152a7e818191710e,
+    'snowy'     : 0xa542a51818a542a5,
+    'tstorm'    : 0x0a04087e8191710e,
+    'windy'     : 0x005f807f001f2010,
+    'clear'     : 0x00184c0686268c18,
 }
 
-ha_weather_map = {
-    'clear-night'     : 'clear', 
+ANIMATED_WEATHER_ICONS = {
+    'sunny': [
+        0x1042183dbc184208,     # diagonal tips off
+        0x9142183dbc184289,     # diagonal tips on (original)
+    ],
+    'clear': [
+        0x00184c0686260c18,     # star A off
+        0x00184c0686068c18,     # star B off
+        0x00184c0606268c18,     # star C off
+        0x00180c0686268c18,     # star D off
+    ],
+    'rainy': [
+        0x002a007e818191710e,   # rain drops low
+        0x152a7e818191710e,     # rain drops high
+        0x0a54007e818191710e,   # rain drops shifted
+    ],
+    'tstorm': [
+        0x0a04087e8191710e,     # lightning bolt left
+        0x5020107e8191710e,     # lightning bolt right
+    ],
+    'foggy': [
+        0x55aa55aa55aa55aa,     # fog pattern A
+        0xaa55aa55aa55aa55,     # fog pattern B
+    ],
+    'windy': [
+        0x025f807f021f2010,     # particles at x=1
+        0x085f807f081f2010,     # particles at x=3
+        0x205f807f201f2010,     # particles at x=5
+        0x805f807f801f2010,     # particles at x=7
+    ],
+}
+
+HA_WEATHER_MAP = {
+    'clear-night'     : 'clear',
     'cloudy'          : 'cloudy',
     'fog'             : 'foggy',
     'hail'            : 'tstorm',
@@ -53,7 +85,7 @@ ha_weather_map = {
     'lightning-rainy' : 'tstorm',
     'partlycloudy'    : 'cloudy',
     'pouring'         : 'rainy',
-    'rainy'           : 'rainy',  
+    'rainy'           : 'rainy',
     'snowy'           : 'snowy',
     'snowy-rainy'     : 'snowy',
     'sunny'           : 'sunny',
@@ -62,78 +94,50 @@ ha_weather_map = {
     'exceptional'     : 'sunny',
 }
 
-def show_message_icons(device, msg, y_offset=0, fill=None, font=None,
-                 scroll_delay=0.03):
+# ---------------------------------------------------------------------------
+# Data helpers
+# ---------------------------------------------------------------------------
+
+def weather_icon(name):
+    """Map a Home Assistant weather state to a list of icon frames.
+
+    Returns animated frames if available, otherwise wraps the static
+    icon in a single-element list.
+
+    Args:
+        name (str): A Home Assistant weather condition string (e.g. 'sunny', 'rainy').
+
+    Returns:
+        list: A list of hex bitmaps (one for static icons, multiple for animated).
     """
-    Scrolls a message right-to-left across the devices display.
-
-    :param device: The device to scroll across.
-    :param msg: The text message to display (must be ASCII only).
-    :type msg: str
-    :param y_offset: The row to use to display the text.
-    :type y_offset: int
-    :param fill: The fill color to use (standard Pillow color name or RGB
-        tuple).
-    :param font: The font (from :py:mod:`luma.core.legacy.font`) to use.
-    :param scroll_delay: The number of seconds to delay between scrolling.
-    :type scroll_delay: float
-    """
-    fps = 0 if scroll_delay == 0 else 1.0 / scroll_delay
-    regulator = framerate_regulator(fps)
-    with canvas(device) as draw:
-        w, h = textsize(msg, font)
-
-    x = device.width
-    virtual = viewport(device, width=w + x + x, height=device.height)
-
-    with canvas(virtual) as draw:
-        text(draw, (x, y_offset), msg, font=font, fill=fill)
-
-    i = 0
-    while i <= w + x:
-        with regulator:
-            virtual.set_position((i, 0))
-            i += 1
-
-
-def vertical_scroll(device, words=None):
-    if words is None:
-        words = ["foo", "bar", "bat", "bang"]
-    messages = [" "] + words + [" "]
-    virtual = viewport(device, width=device.width, height=len(messages) * 12)
-
-    with canvas(virtual) as draw:
-        for i, word in enumerate(messages):
-            text(draw, (0, i * 12), word, fill="white", font=MSG_FONT)
-
-    for i in range(virtual.height - 12):
-        virtual.set_position((0, i))
-        if i > 0 and i % 12 == 0:
-            time.sleep(10)
-        time.sleep(0.044)
-
-
-class Display:
-    def __init__(self):
-        serial = spi(port=0, device=0, gpio=noop())
-        self.device = max7219(serial, cascaded=4, block_orientation=-90, blocks_arranged_in_reverse_order=False)
-        self.device.contrast(0)
-        
+    key = HA_WEATHER_MAP.get(name, 'sunny')
+    if key in ANIMATED_WEATHER_ICONS:
+        return ANIMATED_WEATHER_ICONS[key]
+    return [WEATHER_ICONS[key]]
 
 def humid_icon(humidity_str):
+    """Pick a humidity icon based on the humidity percentage.
+
+    Args:
+        humidity_str (str): Humidity value as a string (e.g. '65').
+
+    Returns:
+        list: Single-element list with the hex bitmap for the appropriate humidity level icon.
+    """
     humidity = int(humidity_str) if humidity_str.isdigit() else 0
-    return next(icon for limit, icon in HUMID_ICONS if humidity > limit)
+    return [next(bitmap for limit, bitmap in HUMID_ICONS if humidity > limit)]
 
 def aqi_to_text(aqi):
-    """
-    Converts an AQI value to its human-readable category using a tuple-based approach.
+    """Convert an AQI value to its human-readable category.
+
     Iterates from highest to lowest threshold and uses -1 for the lowest bound.
-    
-    Parameters:
+
+    Args:
         aqi (int): The Air Quality Index value.
-        
+
     Returns:
-        str: The human-readable name of the AQI category.
+        str: The human-readable name of the AQI category
+            (e.g. 'Good', 'Moderate', 'Hazardous').
     """
     categories = [
         (300, 'Hazardous'),
@@ -141,87 +145,111 @@ def aqi_to_text(aqi):
         (150, 'Unhealthy'),
         (100, 'Unhealthy for Sensitive Groups'),
         (50, 'Moderate'),
-        (-1, 'Good'),  # Use -1 to cover all AQI starting at 0
+        (-1, 'Good'),
     ]
-    
     return next(name for limit, name in categories if aqi > limit)
 
-def weather_icon(name):
-    return WEATHER_ICONS.get(ha_weather_map.get(name, 'sunny'))
+# ---------------------------------------------------------------------------
+# Display screen helpers
+# ---------------------------------------------------------------------------
 
-def icon(draw, origin, icon_hex):
-    points = []
-    for y in range(8):
-        row = (icon_hex >> y * 8) & 0xFF
-        points.extend([(x+origin[0],y+origin[1]) for x in range(8) if (row >> x) & 0x1])
+def show_aqi(display, weather):
+    """Display AQI as a scrolling message if current or forecast exceeds AQI_DISPLAY_THRESHOLD.
 
-    draw.point(points, fill="white")
-
-def cp437_encode(str):
-   return [c.encode('cp437') for c in str]
-
-def transition(device, weather, from_y, to_y, display_func):
-    """Animate the whole thing, moving it into/out of the abyss."""
-    current_y = from_y
-    while current_y != to_y:
-        display_func(device, weather, current_y)
-        time.sleep(0.065)
-        current_y += 1 if to_y > from_y else -1
-
-def display_message(device, first_icon, first_text, second_icon=None, second_text=None, first_offset=(0,0), second_offset=(0,0), y_val=0):
-    with canvas(device) as draw:
-        icon(draw, (0 + first_offset[0], y_val), first_icon)
-        text(draw, (9 + first_offset[1], y_val), first_text, fill="white", font=MSG_FONT)
-        if second_icon and second_text:
-            icon(draw, (17 + second_offset[0], y_val), second_icon)
-            text(draw, (24 + second_offset[1], y_val), second_text, fill="white", font=MSG_FONT)
-    time.sleep(DISPLAY_TIME)
-
-
-
-def show_aqi(device, weather, y_val=0):
+    Args:
+        display (Display): The display instance to render to.
+        weather (dict): Weather data containing 'curr_aqi' and 'for_aqi' keys.
+    """
     curr_aqi = int(weather['curr_aqi']) if weather['curr_aqi'].isdigit() else 0
     for_aqi = int(weather['for_aqi']) if weather['for_aqi'].isdigit() else 0
     msg = ''
-    if curr_aqi > 60:
-        msg += "AQI: {0} {1}   ".format(aqi_to_text(curr_aqi), curr_aqi)
-    if for_aqi > 60:
-        msg += "Tmrrw AQI: {0} {1}".format(aqi_to_text(for_aqi), for_aqi)
-        
+    if curr_aqi > AQI_DISPLAY_THRESHOLD:
+        msg += f"AQI: {aqi_to_text(curr_aqi)} {curr_aqi}   "
+    if for_aqi > AQI_DISPLAY_THRESHOLD:
+        msg += f"Tmrrw AQI: {aqi_to_text(for_aqi)} {for_aqi}"
     if msg:
-        show_message(device, msg, fill="white", font=MSG_FONT, scroll_delay=0.05)
-        time.sleep(0)
+        display.scroll_message(msg, font=STATUS_FONT, scroll_delay=0.022)
 
+def show_notifications(display, msg_provider):
+    """Scroll through any non-weather MQTT notifications.
 
-def show_notifications(device, msg_provider):
-    for msg in msg_provider.messages(filter_topics=['weather']):
-        full_msg = "{}: {}".format(msg.get('name', ''), msg.get('value', ''))
-        show_message(device, cp437_encode(full_msg), fill="white", font=MSG_FONT, scroll_delay=0.022)
-    time.sleep(1)
+    Args:
+        display (Display): The display instance to render to.
+        msg_provider (MessageProvider): The MQTT message provider to read notifications from.
+    """
+    notifications = msg_provider.messages(filter_topics=['weather'])
+    for msg in notifications:
+        text = msg.get('notification', '')
+        display.scroll_message(text, font=STATUS_FONT, scroll_delay=0.022)
+        display.scroll_message(text, font=STATUS_FONT, scroll_delay=0.022)
+    if notifications:
+        time.sleep(1)
 
+# ---------------------------------------------------------------------------
+# Display screens
+# ---------------------------------------------------------------------------
 
-def show_house_cond(device, weather, y_val=0):
-    humidity = weather['in_humid']
-    display_message(device, HOUSE_ICON, weather['in_temp'], humid_icon(humidity), humidity)
+DISPLAY_SCREENS = [
+    {
+        'name': 'house_conditions',
+        'render': lambda d, w: d.display_message(
+            HOUSE_ICON, w['in_temp'],
+            humid_icon(w['in_humid']), w['in_humid'],
+        ),
+    },
+    {
+        'name': 'current_weather',
+        'render': lambda d, w: d.display_message(
+            weather_icon(w['cond']), w['out_temp'],
+            humid_icon(w['out_humid']), w['out_humid'],
+        ),
+    },
+    {
+        'name': 'forecast',
+        'render': lambda d, w: d.display_message(
+            weather_icon(w['for_cond']), w['for_temp'],
+            first_offset=(0, 2),
+        ),
+    },
+    {
+        'name': 'aqi',
+        'render': show_aqi,
+    },
+    {
+        'name': 'clock',
+        'render': lambda d, w: d.show_clock(),
+    },
+]
 
-def show_curr_weather(device, weather, y_val=0):
-    humidity = weather['out_humid']
-    display_message(device, weather_icon(weather['cond']), weather['out_temp'], humid_icon(humidity), humidity)
-
-def show_forecast(device, weather, y_val=0):
-    display_message(device, weather_icon(weather['for_cond']), weather['for_temp'], first_offset=(0,2))
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 def main():
+    """Application entry point.
+
+    Initializes the LED matrix display, connects to MQTT, and continuously
+    cycles through display screens (house conditions, current weather,
+    forecast, AQI) until interrupted.
+    """
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s %(levelname)s %(name)s: %(message)s',
     )
 
+    # Load config
+    load_dotenv('config.env')
+
     # Initialize display
     display = Display()
 
     # Start mqtt message subscription
-    msg_provider = MessageProvider(config)
+    msg_provider = MessageProvider(
+        host=os.environ['MQTT_HOST'],
+        port=int(os.environ.get('MQTT_PORT', 1883)),
+        username=os.environ['MQTT_USERNAME'],
+        password=os.environ['MQTT_PASSWORD'],
+    )
     msg_provider.loop_start()
 
     def exit_gracefully(sig, frame):
@@ -233,24 +261,20 @@ def main():
     signal.signal(signal.SIGTERM, exit_gracefully)
 
     log.info('Display started, waiting for MQTT data')
-    time.sleep(0.5)
+
     while True:
         weather = msg_provider.message('weather')
         if not weather:
-            show_message(display.device, "WAITING FOR DATA...", fill="white", font=MSG_FONT, scroll_delay=0.022)
+            if not msg_provider.connected:
+                display.scroll_message("No Connection...", font=STATUS_FONT, scroll_delay=0.022)
+            else:
+                display.scroll_message("Weather Unavailable...", font=STATUS_FONT, scroll_delay=0.022)
             continue
-            
-        display_funcs = [
-            show_house_cond,
-            show_curr_weather,
-            show_forecast,
-            show_aqi,
-            ]
-        
-        for item in display_funcs: item(display.device, weather)
-        
-        
 
+        for screen in DISPLAY_SCREENS:
+            screen['render'](display, weather)
+
+        show_notifications(display, msg_provider)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
-config.py
+config.env
 venv
 __pycache__
 */__pycache__
 .idea
 *.iml
+env
